@@ -1182,7 +1182,7 @@ textarea{resize:vertical}
   </div>
   <nav id="nav"></nav>
   <div class="sidebar-footer">
-    <button class="settings-btn" onclick="gotoPage('design')">⚙️ <span>Configurações</span></button>
+    <button class="settings-btn" id="btn-nav-config" style="display:none" onclick="gotoPage('design')">⚙️ <span>Configurações</span></button>
     <button class="settings-btn" id="btn-nav-usuarios" style="display:none" onclick="gotoPage('usuarios')">👤 <span>Usuários</span></button>
     <div class="user-pill">
       <div class="user-avatar" id="user-avatar">A</div>
@@ -1240,7 +1240,7 @@ const ROLE_PERMS={
   admin:{
     verFinanceiro:true, editarConfig:true, gerenciarUsuarios:true, excluirOS:true,
     criarOS:true, editarOS:true, moverStatus:true,
-    adicionarCotacao:true, verPrecosCotacao:true, cotarPrecos:true, aprovarCotacao:true,
+    adicionarCotacao:true, verPrecosCotacao:true, cotarPrecos:true,
     adicionarPecas:true,
     editarClientes:true, verEstoque:true, editarEstoque:true,
     criarLancamentos:true,
@@ -1248,15 +1248,15 @@ const ROLE_PERMS={
   recepcao:{
     verFinanceiro:true, editarConfig:false, gerenciarUsuarios:false, excluirOS:false,
     criarOS:true, editarOS:true, moverStatus:true,
-    adicionarCotacao:true, verPrecosCotacao:true, cotarPrecos:false, aprovarCotacao:false,
-    adicionarPecas:true,
+    adicionarCotacao:true, verPrecosCotacao:false, cotarPrecos:false,
+    adicionarPecas:false,
     editarClientes:true, verEstoque:true, editarEstoque:false,
     criarLancamentos:false,
   },
   mecanico:{
     verFinanceiro:false, editarConfig:false, gerenciarUsuarios:false, excluirOS:false,
     criarOS:false, editarOS:true, moverStatus:true,
-    adicionarCotacao:true, verPrecosCotacao:false, cotarPrecos:false, aprovarCotacao:false,
+    adicionarCotacao:true, verPrecosCotacao:false, cotarPrecos:false,
     adicionarPecas:false,
     editarClientes:false, verEstoque:true, editarEstoque:false,
     criarLancamentos:false,
@@ -1319,7 +1319,6 @@ const PERM_LABELS = {
   adicionarCotacao: {icon:"🔩", label:"Adicionar itens à cotação"},
   verPrecosCotacao: {icon:"💰", label:"Ver preços na cotação"},
   cotarPrecos:      {icon:"🏷️", label:"Cotar preços"},
-  aprovarCotacao:   {icon:"✅", label:"Aprovar cotação"},
   adicionarPecas:   {icon:"🔧", label:"Adicionar peças na OS"},
   verFinanceiro:    {icon:"📊", label:"Ver financeiro"},
   criarLancamentos: {icon:"📒", label:"Criar lançamentos"},
@@ -1501,9 +1500,12 @@ function showApp(){
   // mostra botão de usuários só para admin
   const btnU=document.getElementById("btn-nav-usuarios");
   if(btnU) btnU.style.display=SESSION.role==="admin"?"flex":"none";
-  // esconde "Nova OS" para mecânico
+  // mostra botão de configurações só para quem tem permissão
+  const btnCfg=document.getElementById("btn-nav-config");
+  if(btnCfg) btnCfg.style.display=canPage("design")?"flex":"none";
+  // esconde "Nova OS" para quem não pode criar OS
   const btnNova=document.querySelector(".tb-btn-primary");
-  if(btnNova) btnNova.style.display=SESSION.role==="mecanico"?"none":"";
+  if(btnNova) btnNova.style.display=perm("criarOS")?"":"none";
   buildNav();loadAll();
 }
 document.addEventListener("DOMContentLoaded",function(){
@@ -1558,7 +1560,7 @@ function closeSidebar(){
 function buildNav(){
   const alerts=DATA.os.filter(o=>["aguardando_aprovacao","aguardando_pecas"].includes(o.status)).length;
   const critStock=DATA.produtos.filter(p=>Number(p.estoque_atual)<=Number(p.estoque_minimo)).length;
-  const cotPendentes=DATA.os.filter(o=>(o.cotacao_itens||[]).length>0).length;
+  const cotPendentes=(DATA.itensPendentes||[]).length;
   const allowedPages=SESSION?.role?ROLES[SESSION.role]?.pages||[]:[];
   document.getElementById("nav").innerHTML=NAV_ITEMS.filter(n=>n.group||allowedPages.includes(n.id)).map(n=>{
     if(n.group) return `<div class="nav-group">${n.group}</div>`;
@@ -1573,7 +1575,7 @@ function buildNav(){
 }
 function gotoPage(p){
   // bloqueia acesso a páginas não permitidas para o perfil
-  if(!canPage(p)&&!["design","usuarios"].includes(p)){showToast("Acesso não autorizado para seu perfil.","error");return;}
+  if(!canPage(p)){showToast("Acesso não autorizado para seu perfil.","error");return;}
   PAGE=p;
   const allPages=[...NAV_ITEMS,{id:"design",label:"Configurações",icon:"⚙️"},{id:"usuarios",label:"Usuários",icon:"👤"}];
   const n=allPages.find(x=>x.id===p);
@@ -1619,6 +1621,22 @@ function loadDataCache(){
   }catch{return false;}
 }
 
+// carregamento inteligente: por padrão só traz OS ativas (não finalizadas/entregues)
+// + as dos últimos 90 dias — histórico completo é carregado sob demanda (ver carregarHistoricoOS)
+let _osHistoricoCompleto=false;
+function osFetchQuery(){
+  if(_osHistoricoCompleto) return "select=*&order=numero.desc";
+  const limite=new Date(Date.now()-90*24*60*60*1000).toISOString();
+  return `select=*&order=numero.desc&or=(status.not.in.(finalizado,entregue),created_at.gte.${limite})`;
+}
+async function carregarHistoricoOS(){
+  if(_osHistoricoCompleto) return;
+  _osHistoricoCompleto=true;
+  showToast("📜 Carregando histórico completo de OS...");
+  await loadAll();
+  showToast("✅ Histórico completo carregado.");
+}
+
 async function loadAll(){
   setLoading(true);
   // carrega cache imediatamente para exibir dados enquanto busca do servidor
@@ -1626,17 +1644,19 @@ async function loadAll(){
   if(hadCache){setLoading(false);buildNav();render();}
   try{
     const safe=q=>q.catch(()=>[]);
-    const[clis,veis,os,prods,lancs,users]=await Promise.all([
+    const[clis,veis,os,prods,lancs,users,itensPendentes]=await Promise.all([
       safe(sbGet("clientes","select=*&order=created_at.desc")),
       safe(sbGet("veiculos","select=*")),
-      safe(sbGet("ordens_servico","select=*&order=numero.desc")),
+      safe(sbGet("ordens_servico",osFetchQuery())),
       safe(sbGet("produtos","select=*&order=nome")),
       safe(sbGet("lancamentos","select=*&order=created_at.desc")),
       safe(sbGet("usuarios","select=id,username,nome,role,ativo&order=created_at.asc")),
+      safe(sbGet("os_itens","aguardando_preco=eq.true&select=*")),
     ]);
     // qualquer query que falhou retorna [] — o sistema continua funcionando
     DATA.clientes=clis.map(c=>({...c,veiculos:veis.filter(v=>v.cliente_id===c.id)}));
     DATA.veiculos=veis;DATA.os=os;DATA.produtos=prods;DATA.lancamentos=lancs;DATA.usuarios=users;
+    DATA.itensPendentes=itensPendentes;
     saveDataCache(); // atualiza cache com dados frescos
   }catch(e){
     if(!hadCache) showToast("Erro ao carregar: "+e.message,"error");
@@ -1982,12 +2002,17 @@ function renderOS(c){
     const prBg={urgente:"rgba(220,38,38,.12)",alta:"rgba(249,115,22,.1)",media:"",baixa:"rgba(22,163,74,.06)"}[o.prioridade||"media"]||"";
     const prBorder={urgente:"rgba(220,38,38,.35)",alta:"rgba(249,115,22,.3)",media:"var(--border)",baixa:"rgba(22,163,74,.2)"}[o.prioridade||"media"]||"var(--border)";
     const prDot={urgente:"🔴",alta:"🟠",media:"🔵",baixa:"🟢"}[o.prioridade||"media"]||"🔵";
+    const fotoUrl=primeiraFotoUrl(o.fotos);
     return `
       <div onclick="openOSDetail('${o.id}')"
         style="background:var(--bg-surface);border:1px solid ${prBorder};border-left:3px solid ${st.color};
-        border-radius:10px;padding:9px 11px;cursor:pointer;transition:all .15s var(--ease);
+        border-radius:10px;padding:9px 11px;cursor:pointer;transition:all .15s var(--ease);display:flex;gap:8px;align-items:flex-start;
         ${prBg?"background:"+prBg+";":""}
         ${isOld?"outline:1.5px solid rgba(220,38,38,.3)":""}">
+        ${fotoUrl
+          ?`<img src="${fotoUrl}" loading="lazy" style="width:44px;height:44px;border-radius:8px;object-fit:cover;flex-shrink:0;background:#eee"/>`
+          :`<div style="width:44px;height:44px;border-radius:8px;background:var(--bg-elevated);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:var(--text-muted)">${set?.icon||"🔧"}</div>`}
+        <div style="flex:1;min-width:0">
         <!-- Linha 1: número + status + dias -->
         <div style="display:flex;align-items:center;gap:5px;margin-bottom:4px">
           <span style="font-family:var(--font-mono);font-size:10px;font-weight:700;color:var(--accent)">${numOS(o.numero)}</span>
@@ -2011,11 +2036,12 @@ function renderOS(c){
           ${set?`<span style="font-size:8px;font-weight:700;padding:1px 6px;border-radius:20px;background:${set.cor}12;color:${set.cor};border:1px solid ${set.cor}25">${set.icon} ${set.nome}</span>`:""}
           ${prDot!=="🔵"?`<span style="font-size:9px">${prDot}</span>`:""}
           <span style="flex:1"></span>
-          ${o.valor_total>0?`<span style="font-family:var(--font-mono);font-size:10px;font-weight:700;color:var(--success)">${R$(o.valor_total)}</span>`:""}
+          ${o.valor_total>0&&perm("verPrecosCotacao")?`<span style="font-family:var(--font-mono);font-size:10px;font-weight:700;color:var(--success)">${R$(o.valor_total)}</span>`:""}
           <button onclick="event.stopPropagation();openMoverStatus('${o.id}','${o.status}')"
             style="padding:2px 8px;background:var(--accent-tint);border:1px solid var(--accent-glow);border-radius:7px;font-size:9px;font-weight:700;color:var(--accent);cursor:pointer">
             Mover →
           </button>
+        </div>
         </div>
       </div>`;
   };
@@ -2029,6 +2055,11 @@ function renderOS(c){
           oninput="window._osBusca=this.value;renderOS(document.getElementById('content'))" value="${busca}"/>
       </div>
     </div>
+
+    ${!_osHistoricoCompleto?`<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;font-size:11px;color:var(--text-muted)">
+      <span>📜 Mostrando OS ativas + últimos 90 dias.</span>
+      <button onclick="carregarHistoricoOS()" style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:7px;padding:4px 10px;font-size:11px;font-weight:700;color:var(--accent);cursor:pointer">Carregar histórico completo</button>
+    </div>`:""}
 
     <!-- Pills de status -->
     <div class="pill-bar" style="margin-bottom:14px">
@@ -2246,45 +2277,48 @@ async function handleBicosAnexo(event, osId){
 }
 
 // ── COTAÇÕES ──────────────────────────────────────────────
+// Fila central de itens (peça/serviço) solicitados sem preço — mecânico/balcão pedem,
+// admin (cotarPrecos) precifica aqui mesmo ou dentro da OS. Alimentada por DATA.itensPendentes.
 function renderCotacoes(c){
-  // OS com cotação pendente (tem itens sem preço preenchido)
-  const pendentes = DATA.os.filter(o=>{
-    const itens = o.cotacao_itens||[];
-    return itens.length > 0 && itens.some(i=>!i.valor_unitario||Number(i.valor_unitario)===0);
-  });
-  // OS com cotação pronta (todos os itens têm preço, aguarda aprovação)
-  const prontas = DATA.os.filter(o=>{
-    const itens = o.cotacao_itens||[];
-    return itens.length > 0 && itens.every(i=>Number(i.valor_unitario)>0);
-  });
+  if(!_osHistoricoCompleto){
+    c.innerHTML=`<div style="text-align:center;padding:60px;color:var(--text-muted)">⏳ Carregando...</div>`;
+    carregarHistoricoOS();
+    return;
+  }
+  const podeCotar=perm("cotarPrecos");
+  const pendentes=DATA.itensPendentes||[];
 
-  function osCard(o, badge, badgeColor){
-    const cli = DATA.clientes.find(x=>x.id===o.cliente_id);
-    const vei = DATA.veiculos.find(x=>x.id===o.veiculo_id);
-    const set = SETORES.find(s=>s.id===o.setor_id);
-    const itens = o.cotacao_itens||[];
-    const total = itens.reduce((s,i)=>s+Number(i.valor_unitario||0)*Number(i.quantidade||1),0);
-    const semPreco = itens.filter(i=>!i.valor_unitario||Number(i.valor_unitario)===0).length;
+  // agrupa por OS
+  const porOS={};
+  pendentes.forEach(it=>{
+    (porOS[it.os_id]=porOS[it.os_id]||[]).push(it);
+  });
+  const grupos=Object.entries(porOS).map(([osId,itens])=>({osId,itens,o:DATA.os.find(x=>x.id===osId)}));
+
+  function grupoHtml(g){
+    const o=g.o;
+    const cli=o?DATA.clientes.find(x=>x.id===o.cliente_id):null;
+    const set=o?SETORES.find(s=>s.id===o.setor_id):null;
     return `
-      <div style="background:var(--card);border:1px solid var(--border);border-left:3px solid ${badgeColor};border-radius:12px;padding:12px 14px;margin-bottom:8px;cursor:pointer;box-shadow:var(--shadow-card)" onclick="openOSDetail('${o.id}')">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px">
-              <span style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:var(--accent)">${numOS(o.numero)}</span>
-              ${set?`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:20px;background:${set.cor}15;color:${set.cor};border:1px solid ${set.cor}30">${set.icon} ${set.nome}</span>`:""}
-            </div>
-            <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:3px">${esc(cli?.nome||"Cliente")}</div>
-            <div style="font-size:11px;color:var(--text-secondary)">
-              ${itens.length} ${itens.length===1?"peça":"peças"} na cotação
-              ${semPreco>0?`<span style="color:var(--warning);font-weight:700">· ${semPreco} sem preço</span>`:""}
-              ${itens.map(i=>`<div style="font-size:10px;color:var(--muted);margin-top:2px">• ${esc(i.descricao)} ×${i.quantidade} — solicitado por: ${esc(i.solicitado_por||"—")}</div>`).join("")}
-            </div>
-          </div>
-          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0">
-            <span style="background:${badgeColor}15;color:${badgeColor};border:1px solid ${badgeColor}30;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:700">${badge}</span>
-            ${total>0?`<span style="font-family:var(--font-mono);font-size:12px;font-weight:700;color:var(--success)">${R$(total)}</span>`:""}
-          </div>
+      <div style="background:var(--card);border:1px solid var(--border);border-left:3px solid var(--warning);border-radius:12px;padding:12px 14px;margin-bottom:10px;box-shadow:var(--shadow-card)">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;cursor:pointer" onclick="openOSDetail('${g.osId}')">
+          <span style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:var(--accent)">${o?numOS(o.numero):"OS —"}</span>
+          ${set?`<span style="font-size:9px;font-weight:700;padding:1px 7px;border-radius:20px;background:${set.cor}15;color:${set.cor};border:1px solid ${set.cor}30">${set.icon} ${set.nome}</span>`:""}
+          <span style="font-size:12px;font-weight:700;color:var(--text-primary)">${esc(cli?.nome||"Cliente")}</span>
         </div>
+        ${g.itens.map(it=>`
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border-sub,var(--border))">
+            <span style="font-size:13px">${it.tipo==="servico"?"🔧":"🔩"}</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;font-weight:700;color:var(--text-primary)">${esc(it.descricao)} <span style="color:var(--text-muted);font-weight:400">×${it.quantidade}</span></div>
+              ${it.solicitado_por?`<div style="font-size:9px;color:var(--text-muted)">Solicitado por ${esc(it.solicitado_por)}</div>`:""}
+            </div>
+            ${podeCotar?`
+              <input type="number" min="0" step="0.01" placeholder="Valor unit." id="def-preco-${it.id}" style="width:100px;flex-shrink:0"/>
+              <button class="btn btn-red btn-sm" onclick="definirPrecoItem('${it.id}','${g.osId}')" style="flex-shrink:0">💲 Definir</button>
+            `:`<span style="font-size:11px;color:var(--warning);font-weight:700;flex-shrink:0">⏳ Aguardando cotação</span>`}
+            <button class="btn-icon" onclick="removePeca('${it.id}','${it.produto_id||""}',${it.quantidade},'${g.osId}')" title="Remover">🗑️</button>
+          </div>`).join("")}
       </div>`;
   }
 
@@ -2292,51 +2326,29 @@ function renderCotacoes(c){
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div>
         <div style="font-size:18px;font-weight:900;color:var(--text-primary)">🏷️ Cotações</div>
-        <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">Peças solicitadas aguardando preço ou aprovação</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">Peças/serviços solicitados sem preço — mecânico e balcão pedem, admin cota e lança na OS</div>
       </div>
     </div>
 
-    <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px">
+    <div class="stat-grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:20px">
       <div class="stat" style="border-top-color:var(--warning)">
         <div class="stat-icon">⏳</div>
         <div class="stat-val" style="color:var(--warning)">${pendentes.length}</div>
-        <div class="stat-lbl">Ag. cotação</div>
-        <div class="stat-sub">Itens sem preço</div>
+        <div class="stat-lbl">Itens aguardando preço</div>
       </div>
       <div class="stat" style="border-top-color:var(--info)">
-        <div class="stat-icon">✅</div>
-        <div class="stat-val" style="color:var(--info)">${prontas.length}</div>
-        <div class="stat-lbl">Prontas</div>
-        <div class="stat-sub">Aguardando aprovar</div>
-      </div>
-      <div class="stat" style="border-top-color:var(--success)">
-        <div class="stat-icon">📦</div>
-        <div class="stat-val" style="color:var(--success)">${pendentes.reduce((s,o)=>(o.cotacao_itens||[]).length+s,0)+prontas.reduce((s,o)=>(o.cotacao_itens||[]).length+s,0)}</div>
-        <div class="stat-lbl">Total de itens</div>
-        <div class="stat-sub">Em aberto</div>
+        <div class="stat-icon">📋</div>
+        <div class="stat-val" style="color:var(--info)">${grupos.length}</div>
+        <div class="stat-lbl">OS afetadas</div>
       </div>
     </div>
 
-    ${pendentes.length?`
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-        <div style="font-size:11px;font-weight:800;color:var(--warning);text-transform:uppercase;letter-spacing:.5px">⏳ Aguardando preço — ${pendentes.length} OS</div>
-        <div style="flex:1;height:1px;background:var(--border)"></div>
-      </div>
-      ${pendentes.map(o=>osCard(o,"Ag. preço","#d97706")).join("")}
-    `:`
+    ${grupos.length?grupos.map(grupoHtml).join(""):`
       <div class="card" style="text-align:center;padding:24px;color:var(--text-muted)">
         <div style="font-size:24px;margin-bottom:8px">✅</div>
-        <div style="font-size:13px;font-weight:600">Nenhuma cotação aguardando preço</div>
+        <div style="font-size:13px;font-weight:600">Nenhum item aguardando preço</div>
       </div>
     `}
-
-    ${prontas.length?`
-      <div style="display:flex;align-items:center;gap:8px;margin:20px 0 10px">
-        <div style="font-size:11px;font-weight:800;color:var(--info);text-transform:uppercase;letter-spacing:.5px">✅ Prontas para aprovar — ${prontas.length} OS</div>
-        <div style="flex:1;height:1px;background:var(--border)"></div>
-      </div>
-      ${prontas.map(o=>osCard(o,"Aprovar","#2563eb")).join("")}
-    `:""}
   `;
 }
 
@@ -2369,6 +2381,7 @@ function renderKanban(c){
           const days=o.created_at?Math.floor((Date.now()-new Date(o.created_at))/(1000*60*60*24)):0;
           const isOld=days>=3&&!["finalizado","entregue"].includes(o.status);
           const priIcon={baixa:"🟢",alta:"🟡",urgente:"🔴"}[o.prioridade];
+          const fotoUrl=primeiraFotoUrl(o.fotos);
           return `<div class="kanban-card"
               draggable="true"
               data-id="${o.id}"
@@ -2376,7 +2389,8 @@ function renderKanban(c){
               ondragstart="onCardDragStart(event,'${o.id}','${status}')"
               ondragend="onCardDragEnd(event)"
               onclick="openOSDetail('${o.id}')"
-              style="border-left-color:${set?.cor||cfg.color};${isOld?"outline:1px solid rgba(239,68,68,.35)":""}">
+              style="border-left-color:${set?.cor||cfg.color};${isOld?"outline:1px solid rgba(239,68,68,.35)":""}${fotoUrl?`;padding-left:38px`:""}">
+            ${fotoUrl?`<img src="${fotoUrl}" loading="lazy" style="position:absolute;left:6px;top:6px;width:26px;height:26px;border-radius:6px;object-fit:cover;background:#eee"/>`:""}
             <div class="kcard-top">
               <span class="kcard-num">${numOS(o.numero)}</span>
               <span class="${isOld?"old-badge":"kcard-age"}">${isOld?`⚠️ ${days}d`:days===0?"hoje":days+"d"}</span>
@@ -2389,8 +2403,8 @@ function renderKanban(c){
             </div>
             <div class="kcard-footer">
               <span class="kcard-tec">${o.tecnico?`👤 ${esc(o.tecnico.split(" ")[0])}`:""}</span>
-              <span class="kcard-val">${R$(o.valor_total)}</span>
-              ${nextOptions.length?`<button class="kcard-move-btn" onclick="event.stopPropagation();openMoverStatus('${o.id}','${status}')" title="Mover status">→</button>`:""}
+              ${perm("verPrecosCotacao")?`<span class="kcard-val">${R$(o.valor_total)}</span>`:""}
+              ${nextOptions.length&&perm("moverStatus")?`<button class="kcard-move-btn" onclick="event.stopPropagation();openMoverStatus('${o.id}','${status}')" title="Mover status">→</button>`:""}
             </div>
           </div>`;
         }).join("")}
@@ -2402,6 +2416,7 @@ function renderKanban(c){
 }
 
 function openMoverStatus(osId, currentStatus){
+  if(!perm("moverStatus")){showToast("Sem permissão para mover status.","error");return;}
   const o=DATA.os.find(x=>x.id===osId); if(!o)return;
   const cli=DATA.clientes.find(x=>x.id===o.cliente_id);
   const nextOptions=FLOW[currentStatus]||[];
@@ -2431,6 +2446,7 @@ function openMoverStatus(osId, currentStatus){
 
 async function executarMoverStatus(osId,novoStatus,sheetEl){
   sheetEl?.remove();
+  if(!perm("moverStatus")){showToast("Sem permissão para mover status.","error");return;}
   try{
     await sbPatch("ordens_servico",`id=eq.${osId}`,{status:novoStatus});
     const o=DATA.os.find(x=>x.id===osId);
@@ -2447,6 +2463,7 @@ async function executarMoverStatus(osId,novoStatus,sheetEl){
 
 
 function onCardDragStart(e,osId,fromStatus){
+  if(!perm("moverStatus")){e.preventDefault();return;}
   dragOS={id:osId,from:fromStatus};
   e.dataTransfer.effectAllowed="move";
   e.dataTransfer.setData("text/plain",osId);
@@ -2527,6 +2544,7 @@ async function notificarMuralOS(o,acao){
 }
 
 async function quickStatus(id,status){
+  if(!perm("moverStatus")){showToast("Sem permissão para mover status.","error");return;}
   haptic(20);
   const o=DATA.os.find(x=>x.id===id);if(!o)return;
   const hist=[...(Array.isArray(o.historico)?o.historico:[]),{data:nowStr(),acao:`→ ${STATUS[status]?.label}`,user:SESSION?.nome||"Usuário"}];
@@ -3022,7 +3040,6 @@ function openUsuarioForm(id){
       {key:"adicionarCotacao",label:"Adicionar itens à cotação"},
       {key:"verPrecosCotacao",label:"Ver preços na cotação"},
       {key:"cotarPrecos",label:"Cotar preços"},
-      {key:"aprovarCotacao",label:"Aprovar cotação"},
       {key:"adicionarPecas",label:"Adicionar peças direto na OS"},
     ]},
     {group:"Financeiro",perms:[
@@ -3318,6 +3335,11 @@ async function toggleUsuarioAtivo(id,ativo){
 // ── FINANCEIRO ────────────────────────────────────────────
 let finTab="todos";
 function renderRelatorio(c){
+  if(!_osHistoricoCompleto){
+    c.innerHTML=`<div style="text-align:center;padding:60px;color:var(--text-muted)">⏳ Carregando histórico completo para o relatório...</div>`;
+    carregarHistoricoOS();
+    return;
+  }
   const now=new Date();
   const mesAtual=now.getMonth();
   const anoAtual=now.getFullYear();
@@ -3475,6 +3497,10 @@ function renderFinanceiro(c){
 
 // ── DESIGN ───────────────────────────────────────────────
 function renderDesign(c){
+  if(!perm("editarConfig")){
+    c.innerHTML=`<div style="text-align:center;padding:60px;color:var(--text-muted)">🔒 Acesso restrito a administradores.</div>`;
+    return;
+  }
   const isLight=document.body.classList.contains("theme-light");
   const cfg=JSON.parse(localStorage.getItem("maxx_cfg")||"{}");
   c.innerHTML=`
@@ -4036,6 +4062,7 @@ async function salvarRetorno(osId){
 }
 
 function confirmarExcluirOS(id){
+  if(!perm("excluirOS")){showToast("Sem permissão para excluir OS.","error");return;}
   const o=DATA.os.find(x=>x.id===id);if(!o)return;
   const cli=DATA.clientes.find(c=>c.id===o.cliente_id);
   // modal de confirmação com dupla checagem
@@ -4276,6 +4303,7 @@ let _wizStep  = 0;  // 0 = setor, 1 = informações
 let _wizData  = {};
 
 function openNewOS(){
+  if(!perm("criarOS")){showToast("Sem permissão para criar OS.","error");return;}
   _wizFluxo = "veiculo";
   _wizStep  = 0;
   _wizData  = {
@@ -4463,16 +4491,17 @@ function _wizRenderInfo(){
             background:var(--bg-surface);border:1px solid var(--border);border-radius:10px;
             z-index:10;max-height:180px;overflow-y:auto;margin-top:2px;box-shadow:var(--shadow-modal)"></div>
         </div>
-        <details style="margin-top:6px">
+        <details style="margin-top:6px" open>
           <summary style="font-size:11px;color:var(--text-muted);cursor:pointer;padding:6px 0;list-style:none">
             + Cadastrar novo cliente
           </summary>
           <div style="padding:10px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;margin-top:6px">
             <input id="nc-nome" placeholder="Nome completo" style="margin-bottom:8px"/>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
               <input id="nc-tel" placeholder="Telefone" type="tel"/>
               <input id="nc-wpp" placeholder="WhatsApp" type="tel"/>
             </div>
+            <button onclick="_wizCadastrarCliente()" id="nc-btn-cadastrar" style="width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:9px;font-weight:800;font-size:13px;cursor:pointer;font-family:inherit">✅ Cadastrar cliente</button>
           </div>
         </details>`}
     </div>
@@ -4580,6 +4609,28 @@ function _wizBuscaCli(val){
 }
 function _wizSelCli(id,nome,tel){
   _wizData.cli_id=id; _wizData.cli_nome=nome; _wizData.cli_tel=tel; _wizRender();
+}
+
+// cadastra o cliente na hora (confirmação explícita), em vez de criar silenciosamente ao salvar a OS
+async function _wizCadastrarCliente(){
+  const nome=(document.getElementById("nc-nome")?.value||"").trim();
+  const tel=(document.getElementById("nc-tel")?.value||"").trim();
+  const wpp=(document.getElementById("nc-wpp")?.value||"").trim();
+  if(!nome){showToast("Informe o nome do cliente.","error");return;}
+  const btn=document.getElementById("nc-btn-cadastrar");
+  if(btn){btn.disabled=true;btn.textContent="⏳ Cadastrando...";}
+  try{
+    const res=await sbPost("clientes",{nome,telefone:tel,whatsapp:wpp});
+    const novo=(Array.isArray(res)?res[0]:res);
+    if(!novo?.id) throw new Error("Não foi possível cadastrar.");
+    await loadAll();
+    _wizData.cli_id=novo.id; _wizData.cli_nome=nome; _wizData.cli_tel=tel;
+    showToast("✅ Cliente cadastrado!");
+    _wizRender();
+  }catch(e){
+    showToast("Erro: "+e.message,"error");
+    if(btn){btn.disabled=false;btn.textContent="✅ Cadastrar cliente";}
+  }
 }
 function _wizOCR(){
   document.getElementById("ocr-input")?.click();
@@ -5083,6 +5134,8 @@ async function openOSDetail(id){
   _openOSId=id;
   const o=DATA.os.find(x=>x.id===id);if(!o)return;
   const cli=DATA.clientes.find(c=>c.id===o.cliente_id);
+  const vei=DATA.veiculos.find(v=>v.id===o.veiculo_id);
+  const isPatioOS=!o.setor_id||o.setor_id==="patio"||o.tipo_servico==="veiculo"||!o.tipo_servico;
   const itens=await sbGet("os_itens",`os_id=eq.${id}`);
   const totalItens=itens.reduce((s,i)=>s+Number(i.valor_total||0),0);
   _osfBruto=Number(o.valor_mo||0)+totalItens;
@@ -5126,6 +5179,29 @@ async function openOSDetail(id){
             <div id="osf-cli-results" style="display:none;position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:9px;z-index:20;max-height:160px;overflow-y:auto;margin-top:2px"></div>
           </div>
           <div><div class="flabel">CPF/CNPJ</div><input id="osf-cli-doc" value="${esc(cli?.cpf_cnpj||"")}" readonly/></div>
+        </div>
+
+        <div class="osf-section-title">${isPatioOS?"Veículo":"Componente / Peça"}</div>
+        <div class="osf-grid">
+          ${isPatioOS?`
+            <div><div class="flabel">Placa</div><input id="osf-placa" value="${esc(vei?.placa||"")}" style="text-transform:uppercase;font-family:var(--font-mono)"/></div>
+            <div><div class="flabel">Modelo</div><input id="osf-modelo" value="${esc(vei?.modelo||"")}"/></div>
+            <div><div class="flabel">Ano</div><input id="osf-ano" type="number" value="${vei?.ano||""}"/></div>
+            <div><div class="flabel">Motor</div><input id="osf-motor" value="${esc(vei?.motor||"")}"/></div>
+            <div><div class="flabel">KM Entrada</div><input id="osf-km" type="number" value="${o.km_entrada||""}"/></div>
+          `:`
+            <div><div class="flabel">Referência</div><input id="osf-referencia" value="${esc(o.especificacoes?.referencia||"")}" style="font-family:var(--font-mono)" placeholder="0445110249..."/></div>
+            <div><div class="flabel">Marca</div><input id="osf-marca" value="${esc(o.especificacoes?.marca||"")}" placeholder="Bosch / Denso..."/></div>
+            <div><div class="flabel">Quantidade</div><input id="osf-quantidade" type="number" min="1" value="${o.especificacoes?.quantidade||1}"/></div>
+            <div class="span2"><div class="flabel">Aplicação (veículo/motor)</div><input id="osf-aplicacao" value="${esc(o.especificacoes?.aplicacao||"")}" placeholder="Hilux 2.8 D4D, Scania DC13..."/></div>
+          `}
+        </div>
+
+        <div class="osf-section-title">Defeito e Diagnóstico</div>
+        <div class="osf-grid">
+          <div class="span2"><div class="flabel">Defeito relatado *</div><textarea id="osf-descricao" rows="2" placeholder="O que o cliente relatou...">${esc(o.descricao||"")}</textarea></div>
+          <div><div class="flabel">Código de falha / DTC</div><input id="osf-dtc" value="${esc(o.cod_falha||"")}" placeholder="Ex: P0087, P228C"/></div>
+          <div class="span2"><div class="flabel">Diagnóstico técnico</div><textarea id="osf-diagnostico" rows="2" placeholder="O que foi encontrado na inspeção/teste...">${esc(o.diagnostico||"")}</textarea></div>
         </div>
 
         <div class="osf-section-title">Entrega</div>
@@ -5242,20 +5318,23 @@ async function openOSDetail(id){
           </div>
           <div class="osf-totais">
             <div class="osf-section-title" style="margin-top:0">Totais</div>
+            ${perm("verPrecosCotacao")?`
             <div class="osf-total-row"><span>Mão de obra</span><span>${R$(o.valor_mo||0)}</span></div>
             <div class="osf-total-row"><span>Itens</span><span>${R$(totalItens)}</span></div>
             <div class="osf-total-row"><span>Desconto (%)</span><input id="osf-desc-pct" type="number" min="0" max="100" step="0.01" value="${descPct}" oninput="osfCalcTotalGeral()"/></div>
             <div class="osf-total-row"><span>Desconto (R$)</span><input id="osf-desc-val" type="number" min="0" step="0.01" value="${descVal}" oninput="osfCalcTotalGeral()"/></div>
-            <div class="osf-total-row osf-total-final"><span>TOTAL</span><span id="osf-total-final">${R$(total)}</span></div>
+            <div class="osf-total-row osf-total-final"><span>TOTAL</span><span id="osf-total-final">${R$(total)}</span></div>`
+            :`<input type="hidden" id="osf-desc-pct" value="${descPct}"/><input type="hidden" id="osf-desc-val" value="${descVal}"/>
+            <div style="font-size:11px;color:var(--text-muted)">🔒 Sem permissão para ver valores.</div>`}
           </div>
         </div>
 
         <div class="osf-actions">
           <button class="btn btn-ghost" onclick="closeModal()">Fechar</button>
           <button class="btn" onclick="printOS('${id}')">🖨️ Imprimir</button>
-          <button class="btn btn-red" onclick="confirmarExcluirOS('${id}')" style="background:transparent;color:var(--danger);border:1px solid var(--danger-bg);flex:0 0 auto">🗑️ Apagar</button>
-          <button class="btn btn-red" onclick="osfSalvar('${id}',false)">💾 Salvar</button>
-          <button class="btn btn-red" onclick="osfSalvar('${id}',true)">💾 Salvar e Fechar</button>
+          ${perm("excluirOS")?`<button class="btn btn-red" onclick="confirmarExcluirOS('${id}')" style="background:transparent;color:var(--danger);border:1px solid var(--danger-bg);flex:0 0 auto">🗑️ Apagar</button>`:""}
+          ${perm("editarOS")?`<button class="btn btn-red" onclick="osfSalvar('${id}',false)">💾 Salvar</button>
+          <button class="btn btn-red" onclick="osfSalvar('${id}',true)">💾 Salvar e Fechar</button>`:""}
         </div>
       </div>
     </div>`;
@@ -5343,7 +5422,7 @@ async function definirPrecoItem(itemId,osId){
     await recalcularTotal(osId);
     showToast("💲 Preço definido!");
     await loadAll();
-    await openOSDetail(osId);
+    if(PAGE==="cotacao") render(); else await openOSDetail(osId);
   }catch(e){showToast("Erro: "+e.message,"error");}
 }
 
@@ -5367,25 +5446,58 @@ function osfSelCliente(id,nome,doc){
 }
 
 async function osfSalvar(id,fechar){
+  if(!perm("editarOS")){showToast("Sem permissão para editar esta OS.","error");return;}
   const o=DATA.os.find(x=>x.id===id);if(!o)return;
+  const isPatioOS=!o.setor_id||o.setor_id==="patio"||o.tipo_servico==="veiculo"||!o.tipo_servico;
   const novoStatus=document.getElementById("osf-status").value;
+  if(novoStatus!==o.status&&!perm("moverStatus")){showToast("Sem permissão para mudar o status.","error");return;}
   const cliId=document.getElementById("osf-cli-id").value||null;
   const setorId=document.getElementById("osf-setor").value||null;
   const vendedor=document.getElementById("osf-vendedor").value.trim();
   const dataConfirmacao=document.getElementById("osf-confirmacao").value||null;
   const dataEntrega=document.getElementById("osf-entrega-data").value||null;
   const horaEntrega=document.getElementById("osf-entrega-hora").value||"";
+  const descricao=document.getElementById("osf-descricao").value.trim();
+  const codFalha=document.getElementById("osf-dtc").value.trim()||null;
+  const diagnostico=document.getElementById("osf-diagnostico").value.trim()||null;
   const obs=document.getElementById("osf-obs").value;
   const descPct=Number(document.getElementById("osf-desc-pct").value||0);
   const descVal=Number(document.getElementById("osf-desc-val").value||0);
   const especificacoes={...(o.especificacoes||{}),data_confirmacao:dataConfirmacao,hora_entrega:horaEntrega,desconto_pct:descPct,desconto_valor:descVal};
+  let kmEntrada=o.km_entrada;
+  let veiculoId=o.veiculo_id||null;
+  if(isPatioOS){
+    const placa=(document.getElementById("osf-placa")?.value||"").trim().toUpperCase();
+    const modelo=(document.getElementById("osf-modelo")?.value||"").trim();
+    const ano=document.getElementById("osf-ano")?.value||"";
+    const motor=(document.getElementById("osf-motor")?.value||"").trim();
+    kmEntrada=document.getElementById("osf-km")?.value?Number(document.getElementById("osf-km").value):null;
+    try{
+      if(veiculoId){
+        await sbPatch("veiculos",`id=eq.${veiculoId}`,{placa,modelo,ano:ano?parseInt(ano):null,motor});
+      }else if(placa){
+        const res=await sbPost("veiculos",{placa,modelo,ano:ano?parseInt(ano):null,motor,cliente_id:cliId});
+        veiculoId=(Array.isArray(res)?res[0]:res)?.id||null;
+      }
+    }catch(e){showToast("Erro ao salvar veículo: "+e.message,"error");}
+  }else{
+    especificacoes.referencia=(document.getElementById("osf-referencia")?.value||"").trim();
+    especificacoes.marca=(document.getElementById("osf-marca")?.value||"").trim();
+    especificacoes.quantidade=document.getElementById("osf-quantidade")?.value||1;
+    especificacoes.aplicacao=(document.getElementById("osf-aplicacao")?.value||"").trim();
+  }
   try{
     if(novoStatus!==o.status){ await quickStatus(id,novoStatus); }
     await sbPatch("ordens_servico",`id=eq.${id}`,{
       cliente_id:cliId,
+      veiculo_id:veiculoId,
       setor_id:setorId,
       tecnico:vendedor,
       data_entrega:dataEntrega,
+      descricao,
+      cod_falha:codFalha,
+      diagnostico,
+      km_entrada:kmEntrada,
       notas_internas:obs,
       especificacoes,
     });
@@ -5628,210 +5740,6 @@ async function limparAssinatura(osId){
     await loadAll();openOSDetail(osId);
     setTimeout(()=>{document.querySelector(".tab:nth-child(2)")?.click();},80);
   }catch(e){showToast("Erro: "+e.message,"error");}
-}
-
-// ── ABA DE COTAÇÃO ────────────────────────────────────────
-function buildCotacaoTab(o, osId){
-  const itens=o.cotacao_itens||[];
-  const podeCriar=perm("adicionarCotacao");
-  const podeCotar=perm("cotarPrecos");
-  const podeAprovar=perm("aprovarCotacao");
-  const verPrecos=perm("verPrecosCotacao");
-
-  const totalCotado=itens.filter(i=>i.valor_unitario>0).reduce((s,i)=>s+Number(i.valor_unitario||0)*Number(i.quantidade||1),0);
-  const pendentes=itens.filter(i=>!i.valor_unitario||i.valor_unitario===0).length;
-
-  const listaHTML=itens.length?`
-    <table style="width:100%;border-collapse:collapse;margin-bottom:12px">
-      <thead><tr>
-        <th style="text-align:left;padding:7px 10px;font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border)">Peça / Descrição</th>
-        <th style="text-align:center;padding:7px 10px;font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border);white-space:nowrap">Qtd</th>
-        ${verPrecos?`<th style="text-align:right;padding:7px 10px;font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border)">Unit.</th>
-        <th style="text-align:right;padding:7px 10px;font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--border)">Total</th>`:""}
-        <th style="padding:7px 6px;border-bottom:1px solid var(--border)"></th>
-      </tr></thead>
-      <tbody>
-        ${itens.map((it,idx)=>{
-          const total=Number(it.valor_unitario||0)*Number(it.quantidade||1);
-          const cotado=it.valor_unitario>0;
-          return `<tr style="border-bottom:1px solid var(--border)">
-            <td style="padding:8px 10px">
-              <div style="font-size:12px;font-weight:700">${esc(it.descricao)}</div>
-              ${it.obs?`<div style="font-size:10px;color:var(--muted)">${esc(it.obs)}</div>`:""}
-              <div style="font-size:9px;color:var(--muted);margin-top:2px">Solicitado por: ${esc(it.solicitado_por||"—")}</div>
-            </td>
-            <td style="text-align:center;padding:8px 10px;font-size:12px;font-weight:700">×${it.quantidade}</td>
-            ${verPrecos?`<td style="text-align:right;padding:8px 10px">
-              ${podeCotar&&!cotado?`<input type="number" min="0" step="0.01" placeholder="0,00"
-                style="width:90px;padding:4px 7px;font-size:12px;text-align:right"
-                onchange="setCotacaoPreco('${osId}',${idx},this.value)"/>`
-              :`<span style="font-size:12px;font-weight:700;color:${cotado?"var(--text)":"var(--muted)"}">${cotado?R$(it.valor_unitario):"—"}</span>`}
-            </td>
-            <td style="text-align:right;padding:8px 10px;font-size:12px;font-weight:800;color:${cotado?"var(--green)":"var(--muted)"}">
-              ${cotado?R$(total):"—"}
-            </td>`:""}
-            <td style="padding:8px 6px;text-align:center">
-              ${podeCriar?`<button class="btn-icon" onclick="removeCotacaoItem('${osId}',${idx})" title="Remover">🗑️</button>`:""}
-            </td>
-          </tr>`;
-        }).join("")}
-      </tbody>
-    </table>
-    ${verPrecos&&totalCotado>0?`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--card2);border-radius:var(--radius-xs);margin-bottom:12px">
-      <div style="font-size:11px;color:var(--muted)">${pendentes>0?`⚠️ ${pendentes} item(s) sem preço`:"✅ Todos os itens cotados"}</div>
-      <div style="font-size:13px;font-weight:900;color:var(--green)">Total estimado: ${R$(totalCotado)}</div>
-    </div>`:""}
-    ${podeAprovar&&itens.length&&pendentes===0?`
-      <button onclick="aprovarCotacao('${osId}')"
-        style="width:100%;padding:11px;background:var(--success);color:#fff;border:none;border-radius:var(--radius-sm);font-weight:900;font-size:13px;cursor:pointer;margin-bottom:8px">
-        ✅ Aprovar cotação e lançar peças na OS
-      </button>
-      <button onclick="recusarCotacao('${osId}')"
-        style="width:100%;padding:11px;background:transparent;color:var(--accent);border:1.5px solid var(--accent);border-radius:var(--radius-sm);font-weight:700;font-size:13px;cursor:pointer;margin-bottom:10px">
-        ❌ Recusar — lançar sem valor (definir depois)
-      </button>`:""}
-    ${podeAprovar&&pendentes>0&&itens.length?`<div style="font-size:11px;color:var(--muted);text-align:center;margin-bottom:10px">Preencha todos os preços para aprovar</div>`:""}
-  `:`<div style="text-align:center;padding:24px;color:var(--muted);font-size:12px">Nenhuma peça na lista de cotação ainda.</div>`;
-
-  const formHTML=podeCriar?`
-    <div style="background:var(--card2);border-radius:var(--radius-sm);padding:12px 14px;border:1px solid var(--border)">
-      <div style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;margin-bottom:10px">+ Adicionar peça para cotação</div>
-      <div class="grid2" style="margin-bottom:8px">
-        <div class="span2"><div class="flabel">Descrição *</div><input id="cot-desc" placeholder="Ex: Filtro de combustível Scania R450"/></div>
-        <div><div class="flabel">Quantidade *</div><input id="cot-qtd" type="number" min="1" value="1"/></div>
-        <div><div class="flabel">Observação</div><input id="cot-obs" placeholder="Referência, marca, etc."/></div>
-      </div>
-      <button onclick="addCotacaoItem('${osId}')"
-        style="width:100%;padding:9px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-xs);font-weight:800;font-size:13px;cursor:pointer">
-        ＋ Adicionar à lista
-      </button>
-    </div>`:"";
-
-  return `
-    <div style="font-size:11px;color:var(--muted);margin-bottom:12px;padding:8px 10px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:var(--radius-xs)">
-      🏷️ ${podeCotar?"Você pode cotar os preços e aprovar a lista.":"Adicione as peças necessárias. O admin irá cotar os preços."}
-    </div>
-    ${listaHTML}
-    ${formHTML}`;
-}
-
-async function addCotacaoItem(osId){
-  if(!perm("adicionarCotacao")){showToast("Sem permissão para adicionar cotação.","error");return;}
-  const desc=document.getElementById("cot-desc")?.value.trim();
-  const qtd=Number(document.getElementById("cot-qtd")?.value||1);
-  const obs=document.getElementById("cot-obs")?.value.trim()||"";
-  if(!desc){showToast("Informe a descrição da peça.","error");return;}
-  const o=DATA.os.find(x=>x.id===osId);
-  const lista=[...(o.cotacao_itens||[]),{
-    descricao:desc, quantidade:qtd, obs, valor_unitario:0,
-    solicitado_por:SESSION?.nome||"", criado_em:nowStr()
-  }];
-  try{
-    await sbPatch("ordens_servico",`id=eq.${osId}`,{cotacao_itens:lista});
-    showToast("Peça adicionada à lista de cotação.");
-    await loadAll(); openOSDetail(osId);
-    setTimeout(()=>document.querySelector(".tab:nth-child(3)")?.click(),80);
-  }catch(e){showToast("Erro: "+e.message,"error");}
-}
-
-async function removeCotacaoItem(osId,idx){
-  if(!confirm("Remover esta peça da cotação?"))return;
-  const o=DATA.os.find(x=>x.id===osId);
-  const lista=[...(o.cotacao_itens||[])];
-  lista.splice(idx,1);
-  try{
-    await sbPatch("ordens_servico",`id=eq.${osId}`,{cotacao_itens:lista});
-    o.cotacao_itens=lista;
-    showToast("Peça removida.");
-    const panel=document.getElementById("osd-cotacao");
-    if(panel) panel.innerHTML=buildCotacaoTab(o,osId);
-    else{ closeModal();await loadAll(); }
-  }catch(e){showToast("Erro: "+e.message,"error");}
-}
-
-async function setCotacaoPreco(osId,idx,valor){
-  if(!perm("cotarPrecos")){showToast("Sem permissão para cotar preços.","error");return;}
-  const o=DATA.os.find(x=>x.id===osId);
-  const lista=[...(o.cotacao_itens||[])];
-  if(!lista[idx]) return;
-  lista[idx]={...lista[idx],valor_unitario:Number(valor)||0};
-  try{
-    await sbPatch("ordens_servico",`id=eq.${osId}`,{cotacao_itens:lista});
-    // atualiza só o dado local sem re-render completo
-    o.cotacao_itens=lista;
-    const panel=document.getElementById("osd-cotacao");
-    if(panel) panel.innerHTML=buildCotacaoTab(o,osId);
-  }catch(e){showToast("Erro: "+e.message,"error");}
-}
-
-async function aprovarCotacao(osId){
-  if(!perm("aprovarCotacao")){showToast("Sem permissão para aprovar cotação.","error");return;}
-  if(!confirm("Aprovar cotação? Os itens serão lançados como peças na OS. Como não estão vinculados a produtos do estoque, o estoque NÃO será descontado automaticamente."))return;
-  const o=DATA.os.find(x=>x.id===osId);
-  const lista=o.cotacao_itens||[];
-  if(!lista.length){showToast("Nenhum item na cotação.","error");return;}
-
-  try{
-    let valorExtra=0;
-    for(const it of lista){
-      const totalItem=Number(it.valor_unitario||0)*Number(it.quantidade||1);
-      await sbPost("os_itens",{
-        os_id:osId, descricao:it.descricao,
-        quantidade:it.quantidade, valor_unitario:it.valor_unitario,
-        valor_total:totalItem, produto_id:null
-      });
-      valorExtra+=totalItem;
-    }
-    // atualiza valor_total da OS
-    const novoTotal=Number(o.valor_total||0)+valorExtra;
-    // limpa a cotação e salva histórico
-    const hist=[...(Array.isArray(o.historico)?o.historico:[]),{
-      data:nowStr(),acao:`✅ Cotação aprovada — ${lista.length} itens (${R$(valorExtra)})`,user:SESSION?.nome||"Admin"
-    }];
-    await sbPatch("ordens_servico",`id=eq.${osId}`,{
-      cotacao_itens:[], valor_total:novoTotal, historico:hist
-    });
-    await recalcularTotal(osId);
-    showToast(`✅ Cotação aprovada! ${lista.length} peças lançadas — ${R$(valorExtra)}`);
-    await loadAll();
-    openOSDetail(osId);
-    setTimeout(()=>osTab(null,'osd-pecas'),200);
-  }catch(e){showToast("Erro: "+e.message,"error");}
-}
-
-// Admin recusa a cotação — itens voltam como peças na OS com valor pendente
-async function recusarCotacao(osId){
-  if(!perm("aprovarCotacao")){showToast("Sem permissão para recusar cotação.","error");return;}
-  if(!confirm("Recusar cotação? Os itens serão lançados na OS como peças sem valor (você define o preço depois).")) return;
-  const o = DATA.os.find(x=>x.id===osId);
-  const lista = o?.cotacao_itens||[];
-  if(!lista.length){ showToast("Nenhum item na cotação.","error"); return; }
-  try{
-    // Lança cada item na OS sem valor (admin define depois via edição)
-    for(const it of lista){
-      await sbPost("os_itens",{
-        os_id:   osId,
-        descricao: it.descricao + " [aguardando preço]",
-        quantidade: it.quantidade,
-        valor_unitario: 0,
-        valor_total:    0,
-        produto_id:     null
-      });
-    }
-    const hist = [...(Array.isArray(o.historico)?o.historico:[]),{
-      data: nowStr(),
-      acao: `❌ Cotação recusada — ${lista.length} itens lançados sem valor`,
-      user: SESSION?.nome||"Admin"
-    }];
-    await sbPatch("ordens_servico",`id=eq.${osId}`,{
-      cotacao_itens: [], historico: hist
-    });
-    if(o){ o.cotacao_itens=[]; o.historico=hist; }
-    showToast(`❌ Cotação recusada. ${lista.length} peça(s) lançada(s) na OS aguardando preço.`,"error");
-    await loadAll();
-    openOSDetail(osId);
-    setTimeout(()=>osTab(null,"osd-pecas"), 200);
-  }catch(e){ showToast("Erro: "+e.message,"error"); }
 }
 
 // Logo vetorial MAXX Diesel (escudo preto/vermelho/cinza) — usada em todas as impressões
@@ -6260,7 +6168,7 @@ function openVeiculoEdit(veicId,clienteId){
   document.getElementById("modal-root").innerHTML=`
     <div class="overlay" onclick="closeModal()">
       <div class="modal" onclick="event.stopPropagation()">
-        <div class="modal-hd"><div class="modal-title">Editar Veículo</div><button class="modal-x" onclick="openVeiculosForm('${clienteId}')">✕</button></div>
+        <div class="modal-hd"><div class="modal-title">Editar Veículo</div><button class="modal-x" onclick="closeModal()">✕</button></div>
         <div class="grid2">
           <div><div class="flabel">Placa *</div><input id="ve-placa" value="${esc(v.placa)}" style="text-transform:uppercase" inputmode="text" autocapitalize="characters"/></div>
           <div><div class="flabel">Modelo *</div><input id="ve-modelo" value="${esc(v.modelo)}"/></div>
@@ -6309,6 +6217,13 @@ async function deleteVeiculo(id,clienteId){
 // normaliza fotos: aceita strings antigas (URL) ou objetos {url, tag, data} — sempre preserva a tag
 function normalizeFotos(fotos){
   return (fotos||[]).map(f=> typeof f==="string" ? {url:f,tag:""} : {url:f.url||"",tag:f.tag||"",data:f.data||""}).filter(f=>f.url);
+}
+
+// foto de destaque do card (lista/kanban) — prioriza a de entrada, senão a primeira disponível
+function primeiraFotoUrl(fotos){
+  const norm=normalizeFotos(fotos);
+  if(!norm.length) return null;
+  return (norm.find(f=>f.tag==="entrada")||norm[0]).url;
 }
 
 // seção de fotos de uma categoria (tag) — entrada ou saída, funciona igual pra pátio e laboratório
@@ -6500,6 +6415,7 @@ function openFotoViewer(osIdOrUrl, idx){
   let cur = idx||0;
 
   const overlay = document.createElement("div");
+  overlay.className = "foto-viewer-overlay";
   overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:9000;display:flex;align-items:center;justify-content:center;touch-action:none";
   overlay.onclick = e => { if(e.target===overlay) overlay.remove(); };
 
@@ -6509,7 +6425,7 @@ function openFotoViewer(osIdOrUrl, idx){
       <div style="position:relative;max-width:100vw;max-height:100dvh;display:flex;flex-direction:column;align-items:center">
         <div style="position:fixed;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:linear-gradient(rgba(0,0,0,.6),transparent);z-index:1">
           <div style="color:rgba(255,255,255,.7);font-size:12px">${cur+1} / ${urls.length}</div>
-          <button onclick="this.closest('[style*=z-index:9000]').remove()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:20px;width:38px;height:38px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center">✕</button>
+          <button onclick="this.closest('.foto-viewer-overlay').remove()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:20px;width:38px;height:38px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center">✕</button>
         </div>
         <img src="${url}" style="max-width:100vw;max-height:100dvh;object-fit:contain;user-select:none" draggable="false" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"/>
         <div style="display:none;flex-direction:column;align-items:center;gap:12px;color:#fff;padding:40px">
@@ -6761,20 +6677,9 @@ async function removePeca(itemId,prodId,qtd,osId){
       }
     }
 
-    showToast("Peça removida e estoque reposto.");
+    showToast("Peça removida"+(prodId?" e estoque reposto.":"."));
     await loadAll();
-    await openOSDetail(osId);
-    setTimeout(()=>{
-      const tabBtn=document.querySelector(".tab:nth-child(2)");
-      const pecasPanel=document.getElementById("osd-pecas");
-      if(tabBtn&&pecasPanel){
-        document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
-        tabBtn.classList.add("active");
-        ["osd-resumo","osd-pecas","osd-wpp","osd-status","osd-hist"].forEach(x=>{
-          const el=document.getElementById(x);if(el)el.style.display=x==="osd-pecas"?"block":"none";
-        });
-      }
-    },50);
+    if(PAGE==="cotacao") render(); else await openOSDetail(osId);
   }catch(e){showToast("Erro: "+e.message,"error");}
 }
 async function deleteOS(id){
@@ -6908,6 +6813,7 @@ function openEntradaEstoque(prodId){
     </div>`;
 }
 async function saveEntradaEstoque(prodId){
+  if(!perm("editarEstoque")){showToast("Sem permissão para editar estoque.","error");return;}
   const p=DATA.produtos.find(x=>x.id===prodId);if(!p)return;
   const qty=Number(document.getElementById("ent-qty").value);
   if(!qty||qty<=0){showToast("Informe a quantidade.","error");return;}
@@ -6955,6 +6861,7 @@ function openClienteForm(id){
     </div>`;
 }
 async function saveCli(id){
+  if(!perm("editarClientes")){showToast("Sem permissão para editar clientes.","error");return;}
   const nome=document.getElementById("c-nome").value.trim();
   if(!nome){showToast("Nome obrigatório.","error");return;}
   const btn=document.getElementById("btn-save-cli");btn.disabled=true;btn.textContent="⏳ Salvando...";
@@ -6965,6 +6872,7 @@ async function saveCli(id){
   }catch(e){showToast("Erro: "+e.message,"error");btn.disabled=false;btn.textContent=id?"💾 Salvar":"✅ Cadastrar";}
 }
 async function deleteCli(id){
+  if(!perm("editarClientes")){showToast("Sem permissão para excluir clientes.","error");return;}
   const cli=DATA.clientes.find(x=>x.id===id);
   if(!cli)return;
   const veics=DATA.veiculos.filter(v=>v.cliente_id===id);
@@ -7012,6 +6920,7 @@ function openProdutoForm(id){
     </div>`;
 }
 async function saveProd(id){
+  if(!perm("editarEstoque")){showToast("Sem permissão para editar estoque.","error");return;}
   const nome=document.getElementById("p-nome").value.trim();
   if(!nome){showToast("Nome obrigatório.","error");return;}
   const btn=document.getElementById("btn-save-prod");btn.disabled=true;btn.textContent="⏳ Salvando...";
@@ -7021,7 +6930,7 @@ async function saveProd(id){
     showToast("Salvo!");closeModal();await loadAll();
   }catch(e){showToast("Erro: "+e.message,"error");btn.disabled=false;btn.textContent=id?"💾 Salvar":"✅ Salvar";}
 }
-async function deleteProd(id){if(!confirm("Excluir produto?"))return;try{await sbDelete("produtos",`id=eq.${id}`);showToast("Excluído.");await loadAll();}catch(e){showToast("Erro: "+e.message,"error");}}
+async function deleteProd(id){if(!perm("editarEstoque")){showToast("Sem permissão para excluir produtos.","error");return;}if(!confirm("Excluir produto?"))return;try{await sbDelete("produtos",`id=eq.${id}`);showToast("Excluído.");await loadAll();}catch(e){showToast("Erro: "+e.message,"error");}}
 
 // ── LANÇAMENTO FORM ───────────────────────────────────────
 function openLancForm(){
@@ -7045,6 +6954,7 @@ function openLancForm(){
     </div>`;
 }
 async function saveLanc(){
+  if(!perm("criarLancamentos")){showToast("Sem permissão para criar lançamentos.","error");return;}
   const desc=document.getElementById("l-desc").value.trim();
   const valor=document.getElementById("l-valor").value;
   if(!desc||!valor){showToast("Preencha os campos.","error");return;}
@@ -7054,7 +6964,7 @@ async function saveLanc(){
     showToast("Lançamento salvo!");closeModal();await loadAll();
   }catch(e){showToast("Erro: "+e.message,"error");btn.disabled=false;btn.textContent="✅ Salvar";}
 }
-async function deleteLanc(id){if(!confirm("Excluir lançamento?"))return;try{await sbDelete("lancamentos",`id=eq.${id}`);showToast("Excluído.");await loadAll();}catch(e){showToast("Erro: "+e.message,"error");}}
+async function deleteLanc(id){if(!perm("criarLancamentos")){showToast("Sem permissão para excluir lançamentos.","error");return;}if(!confirm("Excluir lançamento?"))return;try{await sbDelete("lancamentos",`id=eq.${id}`);showToast("Excluído.");await loadAll();}catch(e){showToast("Erro: "+e.message,"error");}}
 
 // ── EDITAR CLIENTE INLINE ─────────────────────────────────
 function editCliField(cliId, field, current){
@@ -7502,15 +7412,17 @@ function startAutoRefresh(){
     if(!navigator.onLine) return;         // pausa se offline
     try{
       const safe=q=>q.catch(()=>[]);
-      const[clis,veis,os,prods,lancs]=await Promise.all([
+      const[clis,veis,os,prods,lancs,itensPendentes]=await Promise.all([
         safe(sbGet("clientes","select=*&order=created_at.desc")),
         safe(sbGet("veiculos","select=*")),
-        safe(sbGet("ordens_servico","select=*&order=numero.desc")),
+        safe(sbGet("ordens_servico",osFetchQuery())),
         safe(sbGet("produtos","select=*&order=nome")),
         safe(sbGet("lancamentos","select=*&order=created_at.desc")),
+        safe(sbGet("os_itens","aguardando_preco=eq.true&select=*")),
       ]);
       DATA.clientes=clis.map(c=>({...c,veiculos:veis.filter(v=>v.cliente_id===c.id)}));
       DATA.veiculos=veis;DATA.os=os;DATA.produtos=prods;DATA.lancamentos=lancs;
+      DATA.itensPendentes=itensPendentes;
       saveDataCache();
       updateAppBadge();
       // re-renderiza só se não há modal aberto e não está digitando
@@ -7599,203 +7511,6 @@ function _setFiltroSetor(s){window._filtroSetor=s;_filtroTipo='';renderOS(docume
 function _setFiltroStatus(k){
   _filtroStatus=_filtroStatus===k?'':k;
   renderOS(document.getElementById('conteudo'));
-}
-
-
-function abrirLightbox(osId, idx){
-  const o=DATA.os.find(x=>x.id===osId);if(!o)return;
-  const fotos=Array.isArray(o.fotos)?o.fotos:[];
-  if(!fotos.length)return;
-  let cur=idx||0;
-  const overlay=document.createElement("div");
-  overlay.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:999;display:flex;align-items:center;justify-content:center;touch-action:none";
-  overlay.setAttribute("data-overlay","1");
-
-  const render=()=>{
-    const f=fotos[cur];
-    const url=f?.url||f||"";
-    const tag=f?.tag||"";
-    overlay.innerHTML=
-      '<div style="position:relative;max-width:100vw;max-height:100dvh;display:flex;flex-direction:column;align-items:center">'+
-        '<div style="position:fixed;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:linear-gradient(rgba(0,0,0,.6),transparent)">'+
-          '<div style="color:#fff;font-size:13px;font-weight:700">'+( tag?'📸 '+tag:"")+'</div>'+
-          '<div style="color:rgba(255,255,255,.7);font-size:12px">'+(cur+1)+' / '+fotos.length+'</div>'+
-          '<button onclick="this.closest(\'[style*=z-index:999]\').remove()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:20px;width:36px;height:36px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center">✕</button>'+
-        '</div>'+
-        '<img src="'+url+'" style="max-width:100vw;max-height:100dvh;object-fit:contain;user-select:none" draggable="false"/>'+
-        (fotos.length>1?
-          '<div style="position:fixed;bottom:20px;left:0;right:0;display:flex;align-items:center;justify-content:center;gap:16px">'+
-            '<button onclick="_lbPrev()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:24px;width:48px;height:48px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center">‹</button>'+
-            '<div style="display:flex;gap:6px">'+fotos.map((_,i)=>'<div style="width:7px;height:7px;border-radius:50%;background:'+(i===cur?"#fff":"rgba(255,255,255,.4)")+'"></div>').join("")+'</div>'+
-            '<button onclick="_lbNext()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:24px;width:48px;height:48px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center">›</button>'+
-          '</div>':"")+
-      '</div>';
-  };
-
-  window._lbPrev=()=>{cur=(cur-1+fotos.length)%fotos.length;render();};
-  window._lbNext=()=>{cur=(cur+1)%fotos.length;render();};
-
-  // Swipe horizontal
-  let sx=0;
-  overlay.addEventListener("touchstart",e=>{sx=e.touches[0].clientX;},{passive:true});
-  overlay.addEventListener("touchend",e=>{
-    const dx=e.changedTouches[0].clientX-sx;
-    if(Math.abs(dx)>40){dx<0?window._lbNext():window._lbPrev();}
-  },{passive:true});
-  overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
-
-  render();
-  document.body.appendChild(overlay);
-}
-
-
-
-
-function abrirEditarUsuario(uid){
-  const u=(DATA.usuarios||[]).find(x=>x.id===uid);
-  if(!u)return;
-  const rc={admin:"#9b1c1c",recepcao:"#1d4ed8",mecanico:"#7c3aed"}[u.role]||"#6b7280";
-  const ativo=u.ativo!==false;
-  const perms=u.perms||PERM_PADRAO[u.role]||{};
-  const isSelf=uid===SESSION?.id;
-
-  const overlay=document.createElement("div");
-  overlay.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:400;display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(4px)";
-  overlay.setAttribute("data-overlay","1");
-  overlay.onclick=e=>{if(e.target===overlay)overlay.remove();};
-  overlay.innerHTML=
-    '<div style="background:var(--card);border-radius:24px 24px 0 0;width:100%;max-width:540px;max-height:90dvh;overflow-y:auto;padding:0 0 calc(20px + env(safe-area-inset-bottom));animation:sobir .25s var(--bounce)" onclick="event.stopPropagation()">'+
-    '<div style="width:40px;height:4px;background:var(--border);border-radius:2px;margin:14px auto 10px"></div>'+
-    '<div style="display:flex;align-items:center;justify-content:space-between;padding:0 20px 14px;border-bottom:1px solid var(--border2)">'+
-      '<div>'+
-        '<div style="font-size:17px;font-weight:700">✏️ Editar usuário</div>'+
-        '<div style="font-size:11px;color:'+rc+'">@'+esc(u.username)+'</div>'+
-      '</div>'+
-      '<button onclick="closeModal(); // fecharOverlay(this)" class="sheet-x">✕</button>'+
-    '</div>'+
-    '<div style="padding:14px 20px">'+
-
-      // Info básica
-      '<label class="flabel">Nome completo</label>'+
-      '<input class="finput" id="eu-nome" value="'+esc(u.nome||'')+'"/>'+
-
-      // Role
-      '<label class="flabel">Função / Nível de acesso</label>'+
-      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px" id="eu-role-btns">'+
-        ['admin','recepcao','mecanico'].map(r=>{
-          const labels={admin:'⚙️ Admin',recepcao:'📋 Recepção',mecanico:'🔧 Mecânico'};
-          const on=r===u.role;
-          return '<button onclick="_selRoleEU(\''+r+'\')" data-role="'+r+'" style="padding:10px 4px;border:2px solid '+(on?'{rc}':'var(--border)')+';border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;background:'+(on?'var(--acc-tint)':'var(--bg)')+';font-family:var(--font);color:var(--t1);min-height:44px">'+labels[r]+'</button>';
-        }).join('').replace('{rc}','var(--acc)')+
-      '</div>'+
-      '<input type="hidden" id="eu-role" value="'+u.role+'"/>'+
-
-      // Status ativo
-      (!isSelf?
-        '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:var(--bg);border-radius:10px;margin-bottom:14px">'+
-          '<div>'+
-            '<div style="font-size:13px;font-weight:700">Acesso ao sistema</div>'+
-            '<div style="font-size:11px;color:var(--t2)">'+(ativo?"Usuário ativo — pode entrar":"Usuário bloqueado — não consegue entrar")+'</div>'+
-          '</div>'+
-          '<button onclick="toggleAtivoUsuario(\''+uid+'\','+ativo+');closeModal(); // fecharOverlay(this)" style="padding:8px 14px;border-radius:9px;border:1px solid '+(ativo?'#fca5a5':'#86efac')+';background:'+(ativo?'#fff1f1':'#f0fdf4')+';font-size:12px;font-weight:700;cursor:pointer;color:'+(ativo?'#dc2626':'#16a34a')+'">'+
-            (ativo?'⛔ Bloquear':'✅ Ativar')+
-          '</button>'+
-        '</div>':""+
-        '<div style="padding:10px 14px;background:#fffbeb;border-radius:10px;margin-bottom:14px;font-size:12px;color:#92400e">⚠️ Você não pode bloquear sua própria conta.</div>')+
-
-      // Permissões por módulo
-      '<div style="font-size:11px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Permissões por módulo</div>'+
-      '<div style="background:var(--bg);border-radius:12px;padding:4px 0;margin-bottom:14px" id="eu-perms">'+
-        MODULOS_PERM.map(m=>{
-          const tem=perms[m.id]!==false;
-          return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border2)">'+
-            '<div style="font-size:13px">'+m.icon+' '+m.label+'</div>'+
-            '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">'+
-              '<span style="font-size:11px;color:var(--t2)" id="eu-perm-lbl-'+m.id+'">'+(tem?'Permitido':'Bloqueado')+'</span>'+
-              '<div onclick="_togglePermEU(\''+m.id+'\')" id="eu-perm-tog-'+m.id+'" style="width:44px;height:24px;border-radius:12px;background:'+(tem?'var(--acc)':'var(--border)')+';position:relative;cursor:pointer;transition:background .2s">'+
-                '<div style="position:absolute;top:2px;left:'+(tem?'22px':'2px')+';width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s" id="eu-perm-ball-'+m.id+'"></div>'+
-              '</div>'+
-            '</label>'+
-          '</div>';
-        }).join("")+
-      '</div>'+
-
-      // Reset de senha
-      '<div style="font-size:11px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Redefinir senha</div>'+
-      '<div style="display:flex;gap:8px;margin-bottom:14px">'+
-        '<input class="finput" id="eu-novasenha" type="password" placeholder="Nova senha (deixe em branco para não alterar)" style="flex:1"/>'+
-      '</div>'+
-
-      '<button onclick="salvarEdicaoUsuario(\''+uid+'\')" class="btn-p">💾 Salvar alterações</button>'+
-      '<button onclick="closeModal(); // fecharOverlay(this)" class="btn-s">Cancelar</button>'+
-    '</div></div>';
-
-  document.body.appendChild(overlay);
-
-  // Inicializa estado interno de permissões
-  window._euPerms={...perms};
-}
-
-function _selRoleEU(role){
-  document.getElementById('eu-role').value=role;
-  document.querySelectorAll('#eu-role-btns button').forEach(b=>{
-    const on=b.dataset.role===role;
-    b.style.borderColor=on?'var(--acc)':'var(--border)';
-    b.style.background=on?'var(--acc-tint)':'var(--bg)';
-  });
-  // Atualiza permissões ao trocar role
-  window._euPerms={...(PERM_PADRAO[role]||{})};
-  MODULOS_PERM.forEach(m=>{
-    const tem=window._euPerms[m.id]!==false;
-    const tog=document.getElementById('eu-perm-tog-'+m.id);
-    const ball=document.getElementById('eu-perm-ball-'+m.id);
-    const lbl=document.getElementById('eu-perm-lbl-'+m.id);
-    if(tog){tog.style.background=tem?'var(--acc)':'var(--border)';}
-    if(ball){ball.style.left=tem?'22px':'2px';}
-    if(lbl){lbl.textContent=tem?'Permitido':'Bloqueado';}
-  });
-}
-
-function _togglePermEU(modId){
-  if(!window._euPerms) window._euPerms={};
-  const cur=window._euPerms[modId]!==false;
-  window._euPerms[modId]=!cur;
-  const tem=!cur;
-  const tog=document.getElementById('eu-perm-tog-'+modId);
-  const ball=document.getElementById('eu-perm-ball-'+modId);
-  const lbl=document.getElementById('eu-perm-lbl-'+modId);
-  if(tog){tog.style.background=tem?'var(--acc)':'var(--border)';}
-  if(ball){ball.style.left=tem?'22px':'2px';}
-  if(lbl){lbl.textContent=tem?'Permitido':'Bloqueado';}
-}
-
-async function salvarEdicaoUsuario(uid){
-  const nome=(document.getElementById('eu-nome')?.value||'').trim();
-  const role=document.getElementById('eu-role')?.value||'mecanico';
-  const novaSenha=(document.getElementById('eu-novasenha')?.value||'').trim();
-  if(!nome){showToast('Informe o nome.','erro');return;}
-  if(novaSenha&&novaSenha.length<4){showToast('Senha mínimo 4 caracteres.','erro');return;}
-  const btn=document.querySelector('[data-overlay] .btn-p');
-  if(btn){btn.disabled=true;btn.textContent='Salvando...';}
-  try{
-    const dados={nome,role,perms:window._euPerms||{}};
-    if(novaSenha){
-      let senha=novaSenha;
-      try{const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(novaSenha));senha=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');}catch{}
-      dados.senha=senha;
-    }
-    await sbPatch('usuarios','id=eq.'+uid,dados);
-    const u=(DATA.usuarios||[]).find(x=>x.id===uid);
-    if(u) Object.assign(u,dados);
-    // Atualiza sessão própria se for o usuário logado
-    if(uid===SESSION?.id){SESSION.nome=nome;SESSION.role=role;SESSION.perms=dados.perms;salvarSessao(SESSION);}
-    showToast('✅ Usuário atualizado!');
-    closeModal(); // fecharOverlay(document.querySelector('[data-overlay]'));
-    renderUsuarios(document.getElementById('conteudo'));
-  }catch(e){
-    showToast('Erro: '+e.message,'erro');
-    if(btn){btn.disabled=false;btn.textContent='💾 Salvar alterações';}
-  }
 }
 
 function imprimirVidrinho(id){
