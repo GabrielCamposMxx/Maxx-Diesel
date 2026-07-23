@@ -1637,6 +1637,20 @@ async function carregarHistoricoOS(){
   showToast("✅ Histórico completo carregado.");
 }
 
+// mesma lógica de carregamento inteligente, aplicada aos lançamentos financeiros:
+// por padrão só traz os pendentes + últimos 90 dias — Financeiro carrega tudo ao abrir
+let _lancHistoricoCompleto=false;
+function lancFetchQuery(){
+  if(_lancHistoricoCompleto) return "select=*&order=created_at.desc";
+  const limite=new Date(Date.now()-90*24*60*60*1000).toISOString();
+  return `select=*&order=created_at.desc&or=(status.eq.pendente,created_at.gte.${limite})`;
+}
+async function carregarHistoricoLancamentos(){
+  if(_lancHistoricoCompleto) return;
+  _lancHistoricoCompleto=true;
+  await loadAll();
+}
+
 async function loadAll(){
   setLoading(true);
   // carrega cache imediatamente para exibir dados enquanto busca do servidor
@@ -1649,7 +1663,7 @@ async function loadAll(){
       safe(sbGet("veiculos","select=*")),
       safe(sbGet("ordens_servico",osFetchQuery())),
       safe(sbGet("produtos","select=*&order=nome")),
-      safe(sbGet("lancamentos","select=*&order=created_at.desc")),
+      safe(sbGet("lancamentos",lancFetchQuery())),
       safe(sbGet("usuarios","select=id,username,nome,role,ativo&order=created_at.asc")),
       safe(sbGet("os_itens","aguardando_preco=eq.true&select=*")),
     ]);
@@ -1971,9 +1985,11 @@ function renderOS(c){
   const isPatio = o => !o.setor_id || o.setor_id==="patio" || o.tipo_servico==="veiculo" || !o.tipo_servico;
   const isLab   = o => !isPatio(o);
 
-  // Filtragem comum
+  // Filtragem comum — por padrão (sem filtro de status escolhido) esconde "Entregue"
+  // pra central mostrar só o que está em aberto e evitar confusão com o que já saiu
   const filtrar = list => list.filter(o=>{
-    if(statusFilter && o.status!==statusFilter) return false;
+    if(statusFilter){ if(o.status!==statusFilter) return false; }
+    else if(o.status==="entregue"){ return false; }
     if(!busca) return true;
     const cli=DATA.clientes.find(x=>x.id===o.cliente_id);
     const vei=DATA.veiculos.find(x=>x.id===o.veiculo_id);
@@ -2064,7 +2080,7 @@ function renderOS(c){
     <!-- Pills de status -->
     <div class="pill-bar" style="margin-bottom:14px">
       <div class="pill${!statusFilter?" active":""}" onclick="window._osStatusFilter='';renderOS(document.getElementById('content'))">
-        Todos <span class="pill-count">${DATA.os.length}</span>
+        🔓 Em Aberto <span class="pill-count">${DATA.os.filter(o=>o.status!=="entregue").length}</span>
       </div>
       ${Object.entries(STATUS).map(([k,v])=>{
         const cnt=DATA.os.filter(o=>o.status===k).length;
@@ -3460,6 +3476,11 @@ function renderRelatorio(c){
 }
 
 function renderFinanceiro(c){
+  if(!_lancHistoricoCompleto){
+    c.innerHTML=`<div style="text-align:center;padding:60px;color:var(--text-muted)">⏳ Carregando histórico financeiro completo...</div>`;
+    carregarHistoricoLancamentos();
+    return;
+  }
   const list=DATA.lancamentos.filter(l=>finTab==="todos"||l.tipo===finTab);
   const tR=DATA.lancamentos.filter(l=>l.tipo==="receita"&&l.status==="pago").reduce((s,l)=>s+Number(l.valor),0);
   const tD=DATA.lancamentos.filter(l=>l.tipo==="despesa"&&l.status==="pago").reduce((s,l)=>s+Number(l.valor),0);
@@ -3564,6 +3585,14 @@ function renderDesign(c){
           ${cfg.url?`<span style="font-size:11px;color:var(--success)">✅ Configurado</span>`:`<span style="font-size:11px;color:var(--text-muted)">Não configurado</span>`}
           <a href="https://z-api.io" target="_blank" style="font-size:11px;color:var(--info);text-decoration:none;margin-left:auto">Ver Z-API →</a>
         </div>`;})()}
+    </div>
+
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">📥 Backup dos dados</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5">
+        Baixa um arquivo .json com todas as OS, clientes, veículos, produtos e lançamentos financeiros — útil pra guardar uma cópia de segurança de vez em quando.
+      </div>
+      <button onclick="exportarBackup()" class="btn btn-red btn-sm">📥 Exportar backup agora</button>
     </div>`;
 }
 
@@ -4089,6 +4118,8 @@ function confirmarExcluirOS(id){
 async function excluirOS(id){
   try{
     // remove itens relacionados primeiro
+    const o=DATA.os.find(x=>x.id===id);
+    await deletarFotosStorage(o?.fotos).catch(()=>{});
     await sbDelete("os_itens",`os_id=eq.${id}`).catch(()=>{});
     await sbDelete("lancamentos",`os_id=eq.${id}`).catch(()=>{});
     await sbDelete("ordens_servico",`id=eq.${id}`);
@@ -6368,14 +6399,10 @@ async function handleFotoUpload(event,osId,tag){
   }
 }
 
-async function deleteFoto(osId,index){
-  if(!confirm("Remover esta foto?")) return;
-  const o=DATA.os.find(x=>x.id===osId);
-  const fotos=normalizeFotos(o?.fotos);
-  const url=fotos[index]?.url;
-
-  // tenta deletar do storage (só funciona para URLs do Storage, não base64)
-  if(url && url.startsWith("http")){
+// apaga um ou mais arquivos de foto do Supabase Storage (URLs base64 são ignoradas, só existem em memória)
+async function deletarFotosStorage(fotos){
+  const urls=normalizeFotos(fotos).map(f=>f.url).filter(u=>u&&u.startsWith("http"));
+  await Promise.all(urls.map(async url=>{
     try{
       const match=url.match(/\/object\/public\/os-fotos\/(.+)$/);
       if(match){
@@ -6385,7 +6412,14 @@ async function deleteFoto(osId,index){
         });
       }
     }catch{}
-  }
+  }));
+}
+
+async function deleteFoto(osId,index){
+  if(!confirm("Remover esta foto?")) return;
+  const o=DATA.os.find(x=>x.id===osId);
+  const fotos=normalizeFotos(o?.fotos);
+  await deletarFotosStorage([fotos[index]]);
 
   fotos.splice(index,1);
   await sbPatch("ordens_servico",`id=eq.${osId}`,{fotos});
@@ -6681,11 +6715,6 @@ async function removePeca(itemId,prodId,qtd,osId){
     await loadAll();
     if(PAGE==="cotacao") render(); else await openOSDetail(osId);
   }catch(e){showToast("Erro: "+e.message,"error");}
-}
-async function deleteOS(id){
-  if(!confirm("Excluir esta OS?"))return;
-  try{await sbDelete("os_itens",`os_id=eq.${id}`);await sbDelete("ordens_servico",`id=eq.${id}`);showToast("OS excluída.");closeModal();await loadAll();}
-  catch(e){showToast("Erro: "+e.message,"error");}
 }
 
 // ── CLIENTE FORM ──────────────────────────────────────────
@@ -7417,7 +7446,7 @@ function startAutoRefresh(){
         safe(sbGet("veiculos","select=*")),
         safe(sbGet("ordens_servico",osFetchQuery())),
         safe(sbGet("produtos","select=*&order=nome")),
-        safe(sbGet("lancamentos","select=*&order=created_at.desc")),
+        safe(sbGet("lancamentos",lancFetchQuery())),
         safe(sbGet("os_itens","aguardando_preco=eq.true&select=*")),
       ]);
       DATA.clientes=clis.map(c=>({...c,veiculos:veis.filter(v=>v.cliente_id===c.id)}));
@@ -7641,14 +7670,28 @@ function abrirPreviewImpressao(){
   printOS(os.id);
 }
 
-function importarDados(){
-  const dados={os:DATA.os,clientes:DATA.clientes,veiculos:DATA.veiculos};
-  const blob=new Blob([JSON.stringify(dados,null,2)],{type:'application/json'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='maxx-diesel-backup-'+hoje()+'.json';
-  a.click();
-  showToast('📥 Backup exportado!');
+async function exportarBackup(){
+  showToast('⏳ Preparando backup...');
+  try{
+    // busca histórico completo de OS pro backup, não só o filtro ativo do dia a dia
+    const [os,clientes,veiculos,produtos,lancamentos]=await Promise.all([
+      sbGet("ordens_servico","select=*&order=numero.desc").catch(()=>DATA.os),
+      sbGet("clientes","select=*").catch(()=>DATA.clientes),
+      sbGet("veiculos","select=*").catch(()=>DATA.veiculos),
+      sbGet("produtos","select=*").catch(()=>DATA.produtos),
+      sbGet("lancamentos","select=*").catch(()=>DATA.lancamentos),
+    ]);
+    const dados={geradoEm:nowStr(),os,clientes,veiculos,produtos,lancamentos};
+    const blob=new Blob([JSON.stringify(dados,null,2)],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='maxx-diesel-backup-'+today()+'.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast('📥 Backup exportado!');
+  }catch(e){
+    showToast('Erro ao gerar backup: '+e.message,'error');
+  }
 }
 
 // ══ FIM FUNÇÕES ADICIONADAS ══
